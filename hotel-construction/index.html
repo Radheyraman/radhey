@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hotel Construction 3D</title>
+<style>
+  :root {
+    --panel: rgba(14, 18, 28, 0.72);
+    --text: #f3f1ea;
+    --muted: #a9afbd;
+    --accent: #f2b705;
+    --track: rgba(255, 255, 255, 0.18);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0d1018; color: var(--text);
+    font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  #scene { position: fixed; inset: 0; display: block; width: 100%; height: 100%; }
+  .hud { position: fixed; left: 16px; top: 16px; right: 16px; pointer-events: none;
+    display: flex; flex-direction: column; gap: 6px; max-width: 420px; }
+  .hud .card { background: var(--panel); backdrop-filter: blur(6px); border-radius: 10px; padding: 10px 14px; }
+  .hud h1 { margin: 0; font-size: 15px; letter-spacing: .04em; text-transform: uppercase; color: var(--accent); }
+  #stage { font-size: 18px; font-weight: 600; margin-top: 2px; }
+  #detail { color: var(--muted); font-size: 13px; }
+  .controls { position: fixed; left: 16px; right: 16px; bottom: 16px; background: var(--panel);
+    backdrop-filter: blur(6px); border-radius: 10px; padding: 10px 12px;
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .controls button, .controls select { background: rgba(255,255,255,.1); color: var(--text);
+    border: 1px solid rgba(255,255,255,.18); border-radius: 7px; padding: 6px 10px; font: inherit; cursor: pointer; }
+  .controls button:hover { background: rgba(255,255,255,.18); }
+  #scrub { flex: 1 1 180px; min-width: 120px; accent-color: var(--accent); }
+  #time { font-variant-numeric: tabular-nums; color: var(--muted); min-width: 92px; text-align: right; }
+  .hint { color: var(--muted); font-size: 12px; width: 100%; }
+  @media (max-width: 520px) { #stage { font-size: 16px; } .hint { display: none; } }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<canvas id="scene"></canvas>
+<div class="hud">
+  <div class="card">
+    <h1>Hotel Construction</h1>
+    <div id="stage">Site preparation</div>
+    <div id="detail"></div>
+  </div>
+</div>
+<div class="controls">
+  <button id="play" aria-label="Play or pause">Pause</button>
+  <button id="restart" aria-label="Restart">Restart</button>
+  <input id="scrub" type="range" min="0" max="42" step="0.01" value="0" aria-label="Timeline">
+  <span id="time">0.0s / 42s</span>
+  <select id="speed" aria-label="Speed">
+    <option value="0.5">0.5×</option>
+    <option value="1" selected>1×</option>
+    <option value="2">2×</option>
+  </select>
+  <button id="orbit" aria-label="Toggle camera auto-rotate">Auto-rotate: on</button>
+  <div class="hint">Drag to orbit · scroll / pinch to zoom · drag the timeline to scrub</div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ---------- timeline constants ----------
+const TOTAL = 42;
+const FLOORS = 12;
+const H = 3.2;            // floor-to-floor height
+const Y0 = 0.6;           // top of foundation
+const SLAB_T = 0.35;
+const FLOOR_START = 7;    // first floor begins
+const FLOOR_DUR = 1.8;    // seconds per floor
+const W = 20, D = 14;     // building footprint
+const TOP = Y0 + FLOORS * H;
+
+const clamp01 = v => Math.min(1, Math.max(0, v));
+const prog = (t, s, e) => clamp01((t - s) / (e - s));
+const ease = p => p * p * (3 - 2 * p);
+const lerp = (a, b, p) => a + (b - a) * p;
+
+// ---------- renderer / scene ----------
+const canvas = document.getElementById('scene');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+
+const scene = new THREE.Scene();
+const DAY_SKY = new THREE.Color(0x9ccbe8), DUSK_SKY = new THREE.Color(0x1a2036);
+scene.background = DAY_SKY.clone();
+scene.fog = new THREE.Fog(DAY_SKY.clone(), 90, 260);
+
+const camera = new THREE.PerspectiveCamera(45, 1, 0.5, 600);
+camera.position.set(78, 46, 90);
+const controls = new OrbitControls(camera, canvas);
+controls.target.set(0, 22, 0);
+controls.enableDamping = true;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.35;
+controls.maxPolarAngle = Math.PI / 2 - 0.04;
+controls.minDistance = 25;
+controls.maxDistance = 180;
+
+const hemi = new THREE.HemisphereLight(0xdcecff, 0x5a6b45, 0.9);
+scene.add(hemi);
+const sun = new THREE.DirectionalLight(0xfff2dc, 2.6);
+sun.position.set(40, 70, 30);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -90, right: 60, top: 90, bottom: -50, near: 10, far: 260 });
+sun.shadow.bias = -0.0005;
+scene.add(sun);
+const SUN_DAY = new THREE.Color(0xfff2dc), SUN_DUSK = new THREE.Color(0xff9a55);
+
+// ---------- materials ----------
+const M = {
+  grass: new THREE.MeshStandardMaterial({ color: 0x6f9a52, roughness: 1 }),
+  site: new THREE.MeshStandardMaterial({ color: 0x8b6b4a, roughness: 1 }),
+  pit: new THREE.MeshStandardMaterial({ color: 0x4e3a28, roughness: 1 }),
+  concrete: new THREE.MeshStandardMaterial({ color: 0xbdb8ae, roughness: 0.9 }),
+  column: new THREE.MeshStandardMaterial({ color: 0xa39e95, roughness: 0.85 }),
+  steel: new THREE.MeshStandardMaterial({ color: 0xd9822b, roughness: 0.6, metalness: 0.3 }),
+  crane: new THREE.MeshStandardMaterial({ color: 0xf2b705, roughness: 0.5, metalness: 0.2 }),
+  craneWire: new THREE.MeshBasicMaterial({ color: 0xd9a004, wireframe: true }),
+  dark: new THREE.MeshStandardMaterial({ color: 0x2b2f36, roughness: 0.7 }),
+  hoarding: new THREE.MeshStandardMaterial({ color: 0x2f6aa3, roughness: 0.8 }),
+  road: new THREE.MeshStandardMaterial({ color: 0x3a3d42, roughness: 0.95 }),
+  white: new THREE.MeshStandardMaterial({ color: 0xf2f2ee, roughness: 0.6 }),
+  trunk: new THREE.MeshStandardMaterial({ color: 0x6b4a2f, roughness: 1 }),
+  leaf: new THREE.MeshStandardMaterial({ color: 0x3f7a3a, roughness: 0.9 }),
+  canopy: new THREE.MeshStandardMaterial({ color: 0x23262c, roughness: 0.4, metalness: 0.5 }),
+  bulb: new THREE.MeshStandardMaterial({ color: 0xfff3d0, emissive: 0xffd89a, emissiveIntensity: 0 }),
+  glassDark: new THREE.MeshStandardMaterial({ color: 0x5f86a6, roughness: 0.12, metalness: 0.7 }),
+};
+// lit glass: four groups that switch on at slightly different times at dusk
+const litGlass = [0, 1, 2, 3].map(() => new THREE.MeshStandardMaterial({
+  color: 0x6f93b0, roughness: 0.15, metalness: 0.6, emissive: 0xffb45e, emissiveIntensity: 0 }));
+const SITE_DIRT = new THREE.Color(0x8b6b4a), SITE_PAVED = new THREE.Color(0x9c9a94);
+
+function box(w, h, d, mat, { base = false, shadow = true } = {}) {
+  const g = new THREE.BoxGeometry(w, h, d);
+  if (base) g.translate(0, h / 2, 0);
+  const m = new THREE.Mesh(g, mat);
+  m.castShadow = shadow; m.receiveShadow = true;
+  return m;
+}
+const show = (obj, p) => { obj.visible = p > 0.001; };
+
+// ---------- ground & site ----------
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(600, 600), M.grass);
+ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; scene.add(ground);
+const site = new THREE.Mesh(new THREE.PlaneGeometry(52, 40), M.site);
+site.rotation.x = -Math.PI / 2; site.position.set(-4, 0.01, 2); site.receiveShadow = true; scene.add(site);
+const pit = new THREE.Mesh(new THREE.PlaneGeometry(26, 20), M.pit);
+pit.rotation.x = -Math.PI / 2; pit.position.y = 0.02; pit.receiveShadow = true; scene.add(pit);
+const dirtPile = new THREE.Mesh(new THREE.ConeGeometry(5, 4, 9), M.pit);
+dirtPile.position.set(15, 0, 15); dirtPile.castShadow = true; scene.add(dirtPile);
+
+// hoarding fence
+const fence = new THREE.Group(); scene.add(fence);
+[[-4, 22, 52, 0.2], [-4, -18, 52, 0.2], [-30, 2, 0.2, 40], [22, 2, 0.2, 40]].forEach(([x, z, w, d]) => {
+  const f = box(w, 2.2, d, M.hoarding, { base: true }); f.position.set(x, 0, z); fence.add(f);
+});
+
+// foundation
+const foundation = box(W + 2, 0.8, D + 2, M.concrete, { base: true });
+foundation.position.y = -0.2; scene.add(foundation);
+
+// ---------- structure ----------
+const colXs = [-9.6, -4.8, 0, 4.8, 9.6], colZs = [-6.6, -2.2, 2.2, 6.6];
+const floors = [];
+for (let i = 0; i < FLOORS; i++) {
+  const base = Y0 + i * H;
+  const cols = [];
+  for (const x of colXs) for (const z of colZs) {
+    const c = box(0.55, 1, 0.55, M.column, { base: true });
+    c.position.set(x, base, z); scene.add(c); cols.push(c);
+  }
+  const slab = box(W + 0.6, SLAB_T, D + 0.6, M.concrete, { base: true });
+  slab.position.y = base + H - SLAB_T; scene.add(slab);
+
+  // facade glass
+  const glass = [];
+  const gh = H - SLAB_T - 0.25, gy = base + (H - SLAB_T) / 2;
+  const addPanel = (geo, x, z) => {
+    const lit = i === 0 || Math.random() < 0.55;
+    const mat = lit ? litGlass[(Math.random() * 4) | 0] : M.glassDark;
+    const p = new THREE.Mesh(geo, mat); p.position.set(x, gy, z);
+    p.castShadow = false; p.receiveShadow = true; scene.add(p); glass.push(p);
+  };
+  const nF = 8, wF = W / nF, gF = new THREE.BoxGeometry(wF - 0.12, gh, 0.1);
+  for (const z of [D / 2 + 0.05, -D / 2 - 0.05]) for (let k = 0; k < nF; k++) addPanel(gF, -W / 2 + wF * (k + 0.5), z);
+  const nS = 6, wS = D / nS, gS = new THREE.BoxGeometry(0.1, gh, wS - 0.12);
+  for (const x of [W / 2 + 0.05, -W / 2 - 0.05]) for (let k = 0; k < nS; k++) addPanel(gS, x, -D / 2 + wS * (k + 0.5));
+  glass.sort(() => Math.random() - 0.5);
+
+  // scaffolding (line frame around the floor)
+  const pts = [], ox = W / 2 + 1.2, oz = D / 2 + 1.2;
+  const ring = y => { pts.push(-ox, y, -oz, ox, y, -oz, ox, y, -oz, ox, y, oz, ox, y, oz, -ox, y, oz, -ox, y, oz, -ox, y, -oz); };
+  ring(base + 0.05); ring(base + H / 2);
+  for (let x = -ox; x <= ox + 0.01; x += (2 * ox) / 9) pts.push(x, base, oz, x, base + H, oz, x, base, -oz, x, base + H, -oz);
+  for (let z = -oz; z <= oz + 0.01; z += (2 * oz) / 6) pts.push(ox, base, z, ox, base + H, z, -ox, base, z, -ox, base + H, z);
+  const sg = new THREE.BufferGeometry(); sg.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+  const scaffold = new THREE.LineSegments(sg, new THREE.LineBasicMaterial({ color: 0x9aa0a8 }));
+  scene.add(scaffold);
+
+  floors.push({ cols, slab, glass, scaffold, start: FLOOR_START + i * FLOOR_DUR });
+}
+
+// roof
+const roof = new THREE.Group(); roof.position.y = TOP; scene.add(roof);
+const parapet = box(W + 0.8, 0.9, D + 0.8, M.concrete, { base: true }); roof.add(parapet);
+const plant = box(6, 2.6, 4, M.white, { base: true }); plant.position.set(-5, 0.9, -2); roof.add(plant);
+const plant2 = box(3, 1.6, 3, M.dark, { base: true }); plant2.position.set(3, 0.9, -3); roof.add(plant2);
+// sign
+const sc = document.createElement('canvas'); sc.width = 1024; sc.height = 256;
+const sx = sc.getContext('2d');
+sx.fillStyle = '#14161c'; sx.fillRect(0, 0, 1024, 256);
+sx.fillStyle = '#f5c542'; sx.textAlign = 'center'; sx.textBaseline = 'middle';
+sx.font = 'bold 130px Georgia, serif'; sx.fillText('GRAND HOTEL', 512, 112);
+sx.font = '48px Georgia, serif'; sx.fillText('★ ★ ★ ★ ★', 512, 210);
+const signTex = new THREE.CanvasTexture(sc); signTex.colorSpace = THREE.SRGBColorSpace;
+const signMat = new THREE.MeshStandardMaterial({ map: signTex, emissiveMap: signTex, emissive: 0xffffff, emissiveIntensity: 0.15 });
+const sign = new THREE.Mesh(new THREE.PlaneGeometry(13, 3.25), signMat);
+sign.position.set(0, 0.9 + 2.1, D / 2 - 0.2); roof.add(sign);
+const signBack = box(13.2, 3.4, 0.2, M.dark); signBack.position.set(0, 3.0, D / 2 - 0.35); roof.add(signBack);
+
+// ---------- tower crane ----------
+const MAST = new THREE.Vector3(-15, 0, -11);
+const SECTIONS = 13, SEC_H = 4, JIB_Y = SECTIONS * SEC_H;
+const crane = new THREE.Group(); crane.position.copy(MAST); scene.add(crane);
+const craneBase = box(5, 1, 5, M.concrete, { base: true }); crane.add(craneBase);
+const sections = [];
+for (let j = 0; j < SECTIONS; j++) {
+  const s = new THREE.Group();
+  for (const [x, z] of [[-0.75, -0.75], [0.75, -0.75], [0.75, 0.75], [-0.75, 0.75]]) {
+    const leg = box(0.18, SEC_H, 0.18, M.crane); leg.position.set(x, SEC_H / 2, z); s.add(leg);
+  }
+  const lat = new THREE.Mesh(new THREE.BoxGeometry(1.6, SEC_H, 1.6, 1, 2, 1), M.craneWire);
+  lat.position.y = SEC_H / 2; s.add(lat);
+  crane.add(s); sections.push(s);
+}
+const jib = new THREE.Group(); jib.position.y = JIB_Y; crane.add(jib);
+const jibArm = box(34, 1.1, 1.1, M.crane); jibArm.position.x = 17; jib.add(jibArm);
+const jibLat = new THREE.Mesh(new THREE.BoxGeometry(34, 1.2, 1.2, 12, 1, 1), M.craneWire); jibLat.position.x = 17; jib.add(jibLat);
+const cjib = box(11, 1.1, 1.6, M.crane); cjib.position.x = -5.5; jib.add(cjib);
+const cweight = box(2.4, 2.6, 2.2, M.concrete); cweight.position.set(-9.5, -0.8, 0); jib.add(cweight);
+const cab = box(2, 2, 2, M.white); cab.position.set(1.6, -1.3, 0); jib.add(cab);
+const apex = box(0.9, 6, 0.9, M.crane, { base: true }); apex.position.y = 0.5; jib.add(apex);
+const tieG = new THREE.BufferGeometry().setFromPoints([
+  new THREE.Vector3(0, 6.5, 0), new THREE.Vector3(34, 0.5, 0), new THREE.Vector3(0, 6.5, 0), new THREE.Vector3(-11, 0.5, 0)]);
+jib.add(new THREE.LineSegments(tieG, new THREE.LineBasicMaterial({ color: 0x333333 })));
+const trolley = box(1.4, 0.6, 1.4, M.dark); jib.add(trolley);
+const hook = box(0.6, 0.8, 0.6, M.dark); jib.add(hook);
+const cableG = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+const cable = new THREE.Line(cableG, new THREE.LineBasicMaterial({ color: 0x222222 })); jib.add(cable);
+const load = new THREE.Group(); jib.add(load);
+for (let k = 0; k < 3; k++) { const b = box(6, 0.35, 0.45, M.steel); b.position.set(0, k * 0.36, (k - 1) * 0.5); load.add(b); }
+
+// staging pile of steel next to crane
+const STAGE = new THREE.Vector3(-23, 0, 6);
+const pile = new THREE.Group(); pile.position.copy(STAGE); scene.add(pile);
+for (let k = 0; k < 8; k++) { const b = box(6, 0.35, 0.45, M.steel); b.position.set(0, 0.2 + (k >> 2) * 0.36, (k % 4 - 1.5) * 0.55); pile.add(b); }
+
+// ---------- landscaping ----------
+const land = new THREE.Group(); scene.add(land);
+const road = new THREE.Mesh(new THREE.PlaneGeometry(220, 9), M.road);
+road.rotation.x = -Math.PI / 2; road.position.set(0, 0.03, 27); road.receiveShadow = true; land.add(road);
+for (let x = -100; x < 100; x += 8) { const d = new THREE.Mesh(new THREE.PlaneGeometry(3.5, 0.3), M.white); d.rotation.x = -Math.PI / 2; d.position.set(x, 0.04, 27); land.add(d); }
+const drive = new THREE.Mesh(new THREE.PlaneGeometry(8, 15), M.road);
+drive.rotation.x = -Math.PI / 2; drive.position.set(0, 0.035, 15.5); land.add(drive);
+const canopy = box(10, 0.4, 5, M.canopy); canopy.position.set(0, 3.6, D / 2 + 2.6); land.add(canopy);
+for (const x of [-4.5, 4.5]) { const p = box(0.3, 3.4, 0.3, M.canopy, { base: true }); p.position.set(x, 0, D / 2 + 4.8); land.add(p); }
+const trees = [], lamps = [];
+const treeSpots = [[-14, 14], [-9, 14], [9, 14], [14, 14], [-14, -14], [-7, -14], [0, -14], [7, -14], [14, -14], [-15, 0], [15, -5], [15, 5], [-18, 9], [18, 10]];
+for (const [x, z] of treeSpots) {
+  const t = new THREE.Group(); t.position.set(x, 0, z);
+  const tr = box(0.4, 2, 0.4, M.trunk, { base: true }); t.add(tr);
+  const lf = new THREE.Mesh(new THREE.ConeGeometry(1.8, 4.5, 8), M.leaf); lf.position.y = 4; lf.castShadow = true; t.add(lf);
+  land.add(t); trees.push(t);
+}
+for (let x = -40; x <= 40; x += 16) {
+  const l = new THREE.Group(); l.position.set(x, 0, 22);
+  l.add(box(0.2, 6, 0.2, M.canopy, { base: true }));
+  const b = new THREE.Mesh(new THREE.SphereGeometry(0.45, 12, 8), M.bulb); b.position.y = 6.1; l.add(b);
+  land.add(l); lamps.push(l);
+}
+const entranceLight = new THREE.PointLight(0xffc27a, 0, 30, 1.6);
+entranceLight.position.set(0, 3, D / 2 + 3); scene.add(entranceLight);
+
+// ---------- timeline update (pure function of t, so scrubbing works) ----------
+const tmpA = new THREE.Color();
+function stageFor(t) {
+  if (t < 2.5) return ['Site preparation', 'Hoarding up, excavation under way'];
+  if (t < FLOOR_START) return ['Foundation & tower crane', 'Raft foundation poured, crane mast climbing'];
+  const done = Math.floor((t - FLOOR_START) / FLOOR_DUR) + 1;
+  if (done <= FLOORS) return ['Structural frame', `Floor ${done} of ${FLOORS}: columns, steel lift, slab pour`];
+  if (t < 31) return ['Topping out', 'Roof slab, plant rooms and sign installed'];
+  if (t < 34) return ['Façade & crane removal', 'Glazing closes in, scaffolding and crane come down'];
+  if (t < 36.5) return ['Landscaping', 'Paving, road, trees and entrance canopy'];
+  return ['Grand opening', 'Lights on — the hotel is open'];
+}
+
+function cranePose(t) {
+  // returns { angle, radius, hookY, loaded }
+  const target = (x, z) => { const dx = x - MAST.x, dz = z - MAST.z; return { a: Math.atan2(-dz, dx), r: Math.hypot(dx, dz) }; };
+  const B = target(0, 0), S = target(STAGE.x, STAGE.z);
+  let i = Math.floor((t - FLOOR_START) / FLOOR_DUR);
+  const topNow = Y0 + Math.min(Math.max(i, 0), FLOORS) * H;
+  const high = Math.max(topNow + 7, 14);
+  if (i < 0 || i >= FLOORS) return { a: B.a, r: B.r, y: high, loaded: false };
+  const u = (t - FLOOR_START) / FLOOR_DUR - i;
+  const slabY = Y0 + (i + 1) * H + 0.4;
+  const K = [ // u, pos, y, loaded
+    [0.00, B, high, false], [0.20, S, high, false], [0.32, S, 1.4, false], [0.45, S, high, true],
+    [0.68, B, high, true], [0.84, B, slabY, true], [1.00, B, high, false]];
+  for (let k = 0; k < K.length - 1; k++) {
+    const [u0, p0, y0, l0] = K[k], [u1, p1, y1] = K[k + 1];
+    if (u >= u0 && u <= u1) {
+      const e = ease((u - u0) / (u1 - u0));
+      return { a: lerp(p0.a, p1.a, e), r: lerp(p0.r, p1.r, e), y: lerp(y0, y1, e), loaded: l0 };
+    }
+  }
+  return { a: B.a, r: B.r, y: high, loaded: false };
+}
+
+function update(t) {
+  // site prep
+  show(fence, t < 33.5 ? 1 : 0);
+  fence.scale.y = Math.max(0.001, ease(prog(t, 0, 1.2)));
+  const ex = ease(prog(t, 0.3, 2.5));
+  pit.scale.set(ex, ex, 1); show(pit, ex * (t < 5 ? 1 : 0));
+  const pileP = ease(prog(t, 0.5, 2.5)) * (1 - ease(prog(t, 4.5, 6.5)));
+  dirtPile.scale.setScalar(Math.max(pileP, 0.001)); show(dirtPile, pileP);
+  const fp = ease(prog(t, 2.2, 4.5));
+  foundation.scale.y = Math.max(fp, 0.001); show(foundation, fp);
+
+  // floors
+  for (let i = 0; i < FLOORS; i++) {
+    const f = floors[i];
+    const cp = ease(prog(t, f.start, f.start + FLOOR_DUR * 0.4));
+    for (const c of f.cols) { c.scale.y = Math.max(cp * (H - SLAB_T), 0.001); show(c, cp); }
+    const sp = ease(prog(t, f.start + FLOOR_DUR * 0.8, f.start + FLOOR_DUR * 1.0));
+    f.slab.scale.set(Math.max(sp, 0.02), 1, Math.max(sp, 0.02)); show(f.slab, sp);
+    const scafOff = 31 + (FLOORS - 1 - i) * 0.22;
+    show(f.scaffold, cp * (t < scafOff ? 1 : 0));
+    const gStart = f.start + FLOOR_DUR * 2.2, n = f.glass.length;
+    f.glass.forEach((g, k) => {
+      const gp = ease(prog(t, gStart + (k / n) * 1.4, gStart + (k / n) * 1.4 + 0.3));
+      g.scale.set(1, Math.max(gp, 0.001), 1); show(g, gp);
+    });
+  }
+
+  // roof
+  const rp = ease(prog(t, FLOOR_START + FLOORS * FLOOR_DUR + 0.2, 31));
+  roof.scale.y = Math.max(rp, 0.001); show(roof, rp);
+
+  // crane: mast assembly / dismantle
+  sections.forEach((s, j) => {
+    const up = ease(prog(t, 1.5 + j * 0.35, 1.5 + j * 0.35 + 0.4));
+    const down = ease(prog(t, 32 + (SECTIONS - 1 - j) * 0.2, 32 + (SECTIONS - 1 - j) * 0.2 + 0.25));
+    s.position.y = j * SEC_H + (1 - up) * 3 + down * 3;
+    show(s, up * (1 - down));
+  });
+  show(craneBase, t > 1.2 && t < 35);
+  const jp = ease(prog(t, 6.0, 6.8)) * (1 - ease(prog(t, 31.2, 31.9)));
+  show(jib, jp); jib.scale.set(Math.max(jp, 0.001), 1, 1);
+  const pose = cranePose(t);
+  jib.rotation.y = pose.a;
+  const hy = pose.y - JIB_Y;
+  trolley.position.set(pose.r, -0.85, 0);
+  hook.position.set(pose.r, hy + 0.4, 0);
+  cableG.attributes.position.setXYZ(0, pose.r, -0.85, 0);
+  cableG.attributes.position.setXYZ(1, pose.r, hy + 0.8, 0);
+  cableG.attributes.position.needsUpdate = true;
+  load.position.set(pose.r, hy - 0.6, 0);
+  load.rotation.y = -pose.a; // keep bundle aligned to the building grid
+  load.visible = pose.loaded && jp > 0.5;
+  show(pile, t > 5.5 && t < 31 ? 1 : 0);
+
+  // landscaping
+  const lp = prog(t, 33, 36.5);
+  show(land, lp);
+  trees.forEach((tr, k) => { const p = ease(prog(t, 33.3 + k * 0.15, 33.3 + k * 0.15 + 0.5)); tr.scale.setScalar(Math.max(p, 0.001)); });
+  lamps.forEach((l, k) => { const p = ease(prog(t, 33 + k * 0.2, 33.5 + k * 0.2)); l.scale.y = Math.max(p, 0.001); });
+  site.material.color.copy(SITE_DIRT).lerp(SITE_PAVED, ease(prog(t, 33, 35)));
+
+  // dusk & lights
+  const dusk = ease(prog(t, 35, 38.5));
+  scene.background.copy(DAY_SKY).lerp(DUSK_SKY, dusk);
+  scene.fog.color.copy(scene.background);
+  sun.intensity = lerp(2.6, 0.35, dusk);
+  sun.color.copy(SUN_DAY).lerp(SUN_DUSK, dusk);
+  hemi.intensity = lerp(0.9, 0.22, dusk);
+  litGlass.forEach((m, k) => { m.emissiveIntensity = 0.75 * ease(prog(t, 36 + k * 0.55, 36.6 + k * 0.55)); });
+  const night = ease(prog(t, 36, 38));
+  signMat.emissiveIntensity = lerp(0.15, 1.6, night);
+  M.bulb.emissiveIntensity = 3 * night;
+  entranceLight.intensity = 60 * night;
+
+  const [s, d] = stageFor(t);
+  stageEl.textContent = s; detailEl.textContent = d;
+}
+
+// ---------- UI / loop ----------
+const stageEl = document.getElementById('stage'), detailEl = document.getElementById('detail');
+const playBtn = document.getElementById('play'), scrub = document.getElementById('scrub');
+const timeEl = document.getElementById('time'), speedSel = document.getElementById('speed');
+const orbitBtn = document.getElementById('orbit');
+let t = 0, playing = true, speed = 1, last = performance.now();
+playBtn.onclick = () => { playing = !playing; playBtn.textContent = playing ? 'Pause' : 'Play'; };
+document.getElementById('restart').onclick = () => { t = 0; playing = true; playBtn.textContent = 'Pause'; };
+scrub.oninput = () => { t = parseFloat(scrub.value); };
+speedSel.onchange = () => { speed = parseFloat(speedSel.value); };
+orbitBtn.onclick = () => { controls.autoRotate = !controls.autoRotate; orbitBtn.textContent = 'Auto-rotate: ' + (controls.autoRotate ? 'on' : 'off'); };
+// test hook: jump to a fixed time and pause
+window.__setTime = v => { t = v; playing = false; playBtn.textContent = 'Play'; controls.autoRotate = false; };
+
+function resize() {
+  const w = window.innerWidth, h = window.innerHeight;
+  renderer.setSize(w, h, false); camera.aspect = w / h;
+  camera.fov = w < 600 ? 60 : 45; camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', resize); resize();
+
+function frame(now) {
+  const dt = Math.min((now - last) / 1000, 0.1); last = now;
+  if (playing) { t += dt * speed; if (t > TOTAL) t = 0; }
+  update(t);
+  scrub.value = t.toFixed(2);
+  timeEl.textContent = `${t.toFixed(1)}s / ${TOTAL}s`;
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
